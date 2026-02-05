@@ -1,0 +1,23 @@
+{
+  "name": "personal-ai-employee",
+  "version": "0.1.0",
+  "description": "Bronze Tier - Personal AI Employee Foundation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node orchestrator.js",
+    "dev": "nodemon orchestrator.js",
+    "test": "jest",
+    "lint": "eslint ."
+  },
+  "keywords": ["ai", "automation", "claude", "mcp"],
+  "author": "Personal AI Employee",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic/claude-code": "^1.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "nodemon": "^3.0.0",
+    "eslint": "^8.0.0"
+  }
+}
