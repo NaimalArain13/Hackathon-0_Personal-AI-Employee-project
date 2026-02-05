@@ -71,3 +71,8 @@ ai-employee-vault/.obsidian/
 *.secret*
 secrets/
 credentials.json
+
+# Ignore configuration files with secrets
+.mcp.json
+config.json
+*.config.json
