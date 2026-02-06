@@ -1,0 +1,7 @@
+[
+  {
+    "domain": "@gmail.com",
+    "server": "smtp.gmail.com",
+    "port": 587
+  }
+]

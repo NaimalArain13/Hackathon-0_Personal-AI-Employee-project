@@ -32,7 +32,10 @@ from pathlib import Path as PPath
 sys.path.insert(0, str(PPath(__file__).parent.parent))
 
 from watchers.base_watcher import BaseWatcher
-from watchers.utils import setup_logger, get_file_metadata, create_markdown_frontmatter, sanitize_filename, format_timestamp
+from utils.setup_logger import setup_logger
+from utils.file_utils import create_action_file as create_standard_action_file, create_approval_request
+from utils.conflict_resolver import get_conflict_resolver
+from watchers.utils import get_file_metadata, create_markdown_frontmatter, sanitize_filename, format_timestamp
 
 
 class GmailWatcher(BaseWatcher):
@@ -150,12 +153,19 @@ class GmailWatcher(BaseWatcher):
         Returns:
             True if connection successful, False otherwise
         """
-        self.gmail_service = self.authenticate_gmail()
-        if self.gmail_service:
-            self.logger.info("Successfully connected to Gmail API")
-            return True
-        else:
-            self.logger.error("Failed to connect to Gmail API")
+        def _authenticate_operation():
+            return self.authenticate_gmail()
+
+        try:
+            self.gmail_service = self.exponential_backoff_retry(_authenticate_operation)
+            if self.gmail_service:
+                self.logger.info("Successfully connected to Gmail API")
+                return True
+            else:
+                self.logger.error("Failed to connect to Gmail API")
+                return False
+        except Exception as e:
+            self.logger.error(f"Failed to connect to Gmail API after retries: {e}")
             return False
 
     def get_recent_emails(self, max_results: int = 10) -> List[Dict[str, Any]]:
@@ -172,7 +182,7 @@ class GmailWatcher(BaseWatcher):
             self.logger.error("Gmail service not connected")
             return []
 
-        try:
+        def _fetch_emails_operation():
             # Query for unread emails
             results = self.gmail_service.users().messages().list(
                 userId='me',
@@ -198,8 +208,10 @@ class GmailWatcher(BaseWatcher):
 
             return emails
 
+        try:
+            return self.exponential_backoff_retry(_fetch_emails_operation)
         except Exception as e:
-            self.logger.error(f"Error retrieving emails: {e}")
+            self.logger.error(f"Error retrieving emails after retries: {e}")
             return []
 
     def _parse_email_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
@@ -270,16 +282,24 @@ class GmailWatcher(BaseWatcher):
         Returns:
             List of email dictionaries that represent new updates
         """
-        if not self.gmail_service:
-            if not self.connect():
-                return []
+        def _get_emails_operation():
+            if not self.gmail_service:
+                if not self.connect():
+                    return []
+            return self.get_recent_emails(max_results=10)
 
-        new_emails = self.get_recent_emails(max_results=10)
-        return new_emails
+        try:
+            # Use the exponential backoff retry mechanism from BaseWatcher
+            return self.exponential_backoff_retry(_get_emails_operation)
+        except Exception as e:
+            self.logger.error(f"Failed to get emails after retries: {e}")
+            return []
 
     def create_action_file(self, email: Dict[str, Any]) -> Path:
         """
         Create an action file for the given email in the Needs_Action folder.
+        For sensitive emails, create an approval request instead.
+        Uses conflict resolution to prevent duplicate action items.
 
         Args:
             email: Email dictionary containing email information
@@ -288,42 +308,75 @@ class GmailWatcher(BaseWatcher):
             Path to the created action file
         """
         try:
-            # Create action file in Needs_Action folder
-            needs_action_dir = self.vault_path / 'Needs_Action'
-            needs_action_dir.mkdir(parents=True, exist_ok=True)
+            # Get conflict resolver instance
+            conflict_resolver = get_conflict_resolver(str(self.vault_path))
 
-            # Create a unique filename based on email subject and timestamp
-            subject = email.get('subject', 'no_subject')
-            sanitized_subject = sanitize_filename(subject)[:50]  # Limit length
-            timestamp = format_timestamp().replace(':', '-')
-            filename = f"GMAIL_{sanitized_subject}_{email['id'][:8]}.md"
+            # Determine if this email requires approval
+            priority = self._determine_priority(email)
+            requires_approval = self._requires_approval(email)
 
-            dest_path = needs_action_dir / filename
+            if requires_approval:
+                # Create an approval request for sensitive emails
+                content = f"""# Approval Request: {email.get('subject', 'No Subject')}
 
-            # Create metadata for the action file
-            metadata = {
-                'type': 'gmail_message',
-                'email_id': email['id'],
-                'thread_id': email.get('thread_id'),
-                'subject': email.get('subject'),
-                'from': email.get('from'),
-                'to': email.get('to'),
-                'date': email.get('date'),
-                'timestamp': email.get('timestamp'),
-                'size': email.get('size_estimate'),
-                'has_attachments': len(email.get('attachments', [])) > 0,
-                'labels': email.get('labels', []),
-                'status': 'pending',
-                'priority': self._determine_priority(email)
-            }
+## Email Information
+- **Subject**: {email.get('subject', 'No Subject')}
+- **From**: {email.get('from', 'Unknown')}
+- **Date**: {email.get('date', 'Unknown')}
+- **Priority**: {priority}
+- **Has Attachments**: {len(email.get('attachments', [])) > 0}
 
-            # Create markdown content with frontmatter
-            frontmatter = create_markdown_frontmatter(metadata)
+## Email Content Preview
+{email.get('body', 'No content available')[:500]}
 
-            # Create action file content
-            content = f"""{frontmatter}
+## Attachments
+{self._format_attachments(email.get('attachments', []))}
 
-# New Email: {email.get('subject', 'No Subject')}
+## Action Required
+- Move this file to `/Approved` to approve the response
+- Move this file to `/Rejected` to reject the response
+"""
+
+                approval_data = {
+                    'email_id': email['id'],
+                    'subject': email.get('subject', 'No Subject'),
+                    'from': email.get('from', 'Unknown'),
+                    'body_preview': email.get('body', '')[:200],
+                    'priority': priority,
+                    'has_attachments': len(email.get('attachments', [])) > 0
+                }
+
+                # Check for duplicates before creating approval request
+                is_duplicate, existing_path = conflict_resolver.is_duplicate_action_item(
+                    content, 'gmail', email.get('from', 'unknown')
+                )
+
+                if is_duplicate:
+                    self.logger.info(f"Duplicate approval request detected for email from {email.get('from', 'unknown')}, skipping creation")
+                    return Path(existing_path) if existing_path else None
+
+                approval_path = create_approval_request(
+                    str(self.vault_path),
+                    'gmail_response',
+                    approval_data,
+                    f"Email Response Approval: {email.get('subject', 'No Subject')[:50]}"
+                )
+
+                # Register the approval request to prevent future duplicates
+                conflict_resolver.register_action_item(
+                    content,
+                    str(approval_path),
+                    'gmail',
+                    email.get('from', 'unknown')
+                )
+
+                self.logger.info(f"Created approval request for sensitive email: {approval_path}")
+                return approval_path
+            else:
+                # Create a standard action file for regular emails
+                subject = email.get('subject', 'no_subject')
+                sanitized_subject = sanitize_filename(subject)[:50]  # Limit length
+                content = f"""# New Email: {email.get('subject', 'No Subject')}
 
 ## Sender Information
 - **From**: {email.get('from', 'Unknown')}
@@ -348,12 +401,49 @@ class GmailWatcher(BaseWatcher):
 4. Flag for approval if necessary
 """
 
-            # Write the content to the destination file
-            with open(dest_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+                # Check for duplicates before creating action file
+                is_duplicate, existing_path = conflict_resolver.is_duplicate_action_item(
+                    content, 'gmail', email.get('from', 'unknown')
+                )
 
-            self.logger.info(f"Created action file for email: {dest_path}")
-            return dest_path
+                if is_duplicate:
+                    self.logger.info(f"Duplicate action item detected for email from {email.get('from', 'unknown')}, skipping creation")
+                    return Path(existing_path) if existing_path else None
+
+                # Create metadata for the action file
+                frontmatter = {
+                    'type': 'gmail_message',
+                    'email_id': email['id'],
+                    'thread_id': email.get('thread_id'),
+                    'subject': email.get('subject'),
+                    'from': email.get('from'),
+                    'to': email.get('to'),
+                    'date': email.get('date'),
+                    'timestamp': email.get('timestamp'),
+                    'size': email.get('size_estimate'),
+                    'has_attachments': len(email.get('attachments', [])) > 0,
+                    'labels': email.get('labels', []),
+                    'status': 'pending',
+                    'priority': priority
+                }
+
+                action_path = create_standard_action_file(
+                    str(self.vault_path / 'Needs_Action'),
+                    f"GMAIL_{sanitized_subject}",
+                    content,
+                    frontmatter
+                )
+
+                # Register the action item to prevent future duplicates
+                conflict_resolver.register_action_item(
+                    content,
+                    str(action_path),
+                    'gmail',
+                    email.get('from', 'unknown')
+                )
+
+                self.logger.info(f"Created action file for email: {action_path}")
+                return action_path
 
         except Exception as e:
             self.logger.error(f"Error creating action file for email {email.get('id', 'unknown')}: {e}")
@@ -415,6 +505,72 @@ class GmailWatcher(BaseWatcher):
 
         return formatted
 
+    def _requires_approval(self, email: Dict[str, Any]) -> bool:
+        """
+        Determine if an email requires human approval based on content analysis.
+
+        Args:
+            email: Email dictionary containing email information
+
+        Returns:
+            True if the email requires approval, False otherwise
+        """
+        subject = email.get('subject', '').lower()
+        body = email.get('body', '').lower()
+        sender = email.get('from', '').lower()
+
+        # Keywords that indicate the email might need approval
+        approval_keywords = [
+            # Emotional/controversial content
+            'complaint', 'angry', 'disappointed', 'frustrated', 'concerned',
+            'unhappy', 'dissatisfied', 'terrible', 'awful', 'horrible',
+
+            # Legal matters
+            'legal', 'lawyer', 'lawsuit', 'contract', 'agreement', 'terms',
+            'liability', 'responsibility', 'court', 'attorney',
+
+            # Financial matters
+            'payment', 'invoice', 'refund', 'charge', 'money', 'financial',
+            'bank', 'account', 'credit', 'debit', 'expense', 'budget',
+
+            # Medical/health
+            'medical', 'health', 'doctor', 'hospital', 'medicine', 'prescription',
+            'patient', 'treatment', 'condition',
+
+            # Personal/private
+            'personal', 'private', 'confidential', 'secret', 'intimate',
+
+            # Urgent/critical
+            'urgent', 'emergency', 'critical', 'immediate', 'asap',
+
+            # Authority figures
+            'manager', 'director', 'ceo', 'boss', 'supervisor', 'hr', 'human resources'
+        ]
+
+        # Check if any approval keywords are in the subject or body
+        email_text = f"{subject} {body} {sender}"
+
+        for keyword in approval_keywords:
+            if keyword in email_text:
+                return True
+
+        # Check for certain sender types that might need approval
+        sensitive_senders = [
+            'legal@', 'lawyer@', 'ceo@', 'manager@', 'hr@', 'hrdepartment@',
+            'compliance@', 'audit@', 'auditdepartment@'
+        ]
+
+        for sender_pattern in sensitive_senders:
+            if sender_pattern in sender:
+                return True
+
+        # If the priority is high, it might need approval
+        priority = self._determine_priority(email)
+        if priority == 'high':
+            return True
+
+        return False
+
     def run(self):
         """
         Main execution loop for the Gmail watcher.
@@ -442,15 +598,18 @@ class GmailWatcher(BaseWatcher):
                             self.logger.info(f"Created action file: {action_file_path}")
 
                             # Mark email as read after creating action file
-                            try:
-                                self.gmail_service.users().messages().modify(
+                            def _mark_as_read_operation():
+                                return self.gmail_service.users().messages().modify(
                                     userId='me',
                                     id=email['id'],
                                     body={'removeLabelIds': ['UNREAD']}
                                 ).execute()
+
+                            try:
+                                self.exponential_backoff_retry(_mark_as_read_operation)
                                 self.logger.debug(f"Marked email {email['id']} as read")
                             except Exception as e:
-                                self.logger.error(f"Error marking email as read: {e}")
+                                self.logger.error(f"Error marking email as read after retries: {e}")
 
                 # Wait for the specified interval before checking again
                 time.sleep(self.check_interval)
