@@ -1,5 +1,6 @@
 import time
 import logging
+import random
 from pathlib import Path
 from abc import ABC, abstractmethod
 
@@ -48,6 +49,35 @@ class BaseWatcher(ABC):
             Path to the created action file
         """
         pass
+
+    def exponential_backoff_retry(self, operation, max_retries=5, initial_delay=1):
+        """
+        Execute an operation with exponential backoff retry strategy.
+
+        Args:
+            operation: Callable to execute
+            max_retries: Maximum number of retry attempts (default 5)
+            initial_delay: Initial delay in seconds (default 1)
+
+        Returns:
+            Result of the operation if successful
+        """
+        delay = initial_delay
+        for attempt in range(max_retries):
+            try:
+                return operation()
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    self.logger.error(f"Operation failed after {max_retries} attempts: {e}")
+                    raise
+                else:
+                    self.logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                    delay *= 2  # Double the delay for next attempt (plus some jitter)
+                    delay += random.uniform(0, 1)  # Add jitter to prevent thundering herd
+
+        # This should not be reached, but included for completeness
+        raise RuntimeError(f"Failed to execute operation after {max_retries} attempts")
 
     def run(self):
         """

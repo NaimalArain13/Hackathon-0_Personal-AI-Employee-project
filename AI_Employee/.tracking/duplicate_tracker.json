@@ -1,0 +1,23 @@
+{
+  "18fe037e2386ce126f062f63bfc0855b26d622985c2faaa24ce277cd04911302": {
+    "file_path": "AI_Employee/Needs_Action/GMAIL_Silver_tier_test_20260206_151624.md",
+    "channel": "gmail",
+    "sender_id": "\"nature's Life\" <natureslife101@gmail.com>",
+    "timestamp": "2026-02-06T15:16:24.034545",
+    "content_hash": "18fe037e2386ce126f062f63bfc0855b26d622985c2faaa24ce277cd04911302"
+  },
+  "a38fa8733ec6120f1acfc244329cc249030109cebf36d100d22fa5ac365c38f1": {
+    "file_path": "AI_Employee/Needs_Action/GMAIL_Email_2_for_manual_testing_20260206_152025.md",
+    "channel": "gmail",
+    "sender_id": "\"nature's Life\" <natureslife101@gmail.com>",
+    "timestamp": "2026-02-06T15:20:25.972608",
+    "content_hash": "a38fa8733ec6120f1acfc244329cc249030109cebf36d100d22fa5ac365c38f1"
+  },
+  "ea80a505f6d643f125e7da0d09c290dcba6910a48811c72cc535247e852d13b4": {
+    "file_path": "AI_Employee/Needs_Action/GMAIL_Re__Email_2_for_manual_testing_20260206_152227.md",
+    "channel": "gmail",
+    "sender_id": "\"nature's Life\" <natureslife101@gmail.com>",
+    "timestamp": "2026-02-06T15:22:27.362593",
+    "content_hash": "ea80a505f6d643f125e7da0d09c290dcba6910a48811c72cc535247e852d13b4"
+  }
+}

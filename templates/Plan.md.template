@@ -1,0 +1,39 @@
+---
+type: "plan_document"
+title: "{{TITLE}}"
+created: "{{CREATED_ISO}}"
+status: "pending"
+total_tasks: {{TOTAL_TASKS}}
+completed_tasks: 0
+estimated_duration: "{{ESTIMATED_DURATION}}"
+priority: "{{PRIORITY}}"
+tags: {{TAGS}}
+related_entities: {{RELATED_ENTITIES}}
+---
+
+# {{TITLE}}
+
+## Description
+{{DESCRIPTION}}
+
+## Goals
+{{GOALS}}
+
+## Tasks
+{{TASKS}}
+
+## Timeline
+- **Start Date**: {{START_DATE}}
+- **Target Completion**: {{TARGET_COMPLETION}}
+
+## Resources Needed
+{{RESOURCES_NEEDED}}
+
+## Dependencies
+{{DEPENDENCIES}}
+
+## Success Criteria
+{{SUCCESS_CRITERIA}}
+
+## Notes
+{{NOTES}}

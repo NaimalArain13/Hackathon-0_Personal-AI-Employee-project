@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Done/GMAIL_Testing 123_19c2dcd6.md",
+                "file": "Needs_Action/GMAIL_Re__Email_2_for_manual_testing_20260206_152227.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "GMAIL_Testing 123_19c2dcd6"
+              "title": "GMAIL_Re__Email_2_for_manual_testing_20260206_152227"
             }
           }
         ]
@@ -94,7 +94,6 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Done/GMAIL_Testing 123_19c2dcd6.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +103,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for GMAIL_Testing 123_19c2dcd6"
+              "title": "Backlinks"
             }
           },
           {
@@ -113,12 +112,11 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Done/GMAIL_Testing 123_19c2dcd6.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from GMAIL_Testing 123_19c2dcd6"
+              "title": "Outgoing links"
             }
           },
           {
@@ -183,6 +181,21 @@
       "bases:Create new base": false
     }
   },
-  "active": "891890bf8b287402",
-  "lastOpenFiles": []
+  "active": "ed4741b18ce3ef29",
+  "lastOpenFiles": [
+    "Needs_Action/GMAIL_Email_2_for_manual_testing_20260206_152025.md",
+    "Needs_Action/GMAIL_Re__Email_2_for_manual_testing_20260206_152227.md",
+    "Needs_Action/GMAIL_Silver_tier_test_20260206_151624.md",
+    "Company_Handbook.md.tmp.7893.1770308121545",
+    "Dashboard.md.tmp.7893.1770308078405",
+    "Logs",
+    "Approved",
+    "Pending_Approval",
+    "Plans",
+    "attachments",
+    "Done/GMAIL_Testing 123_19c2dcd6.md",
+    "Done",
+    "Dashboard.md",
+    "Company_Handbook.md"
+  ]
 }

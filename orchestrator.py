@@ -11,6 +11,7 @@ import time
 import signal
 import logging
 import argparse
+import threading
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
@@ -22,7 +23,13 @@ load_dotenv()
 # Add the project root to the path to import from other modules
 sys.path.insert(0, str(Path(__file__).parent))
 
-from watchers.utils import setup_logger, ensure_directory_exists
+from utils.setup_logger import setup_logger
+from utils.file_utils import scan_for_approval_changes
+
+
+def ensure_directory_exists(path: str):
+    """Ensure a directory exists, creating it if necessary."""
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 class Orchestrator:
@@ -42,6 +49,8 @@ class Orchestrator:
         self.logger = setup_logger("Orchestrator", level=logging.INFO)
         self.config = self.load_config(config_path)
         self.running = True
+        self.watchers = []
+        self.watcher_threads = []
 
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -50,6 +59,10 @@ class Orchestrator:
         # Ensure vault directory exists
         vault_path = self.config.get('VAULT_PATH', 'D:\\Obsidian Vaults\\AI_Employee_Vault')
         ensure_directory_exists(vault_path)
+
+        # Initialize Silver Tier features
+        self.approval_monitor_thread = None
+        self.scheduled_task_thread = None
 
         self.logger.info("Orchestrator initialized successfully")
 
@@ -86,7 +99,11 @@ class Orchestrator:
             'CHECK_INTERVAL': '60',
             'LOG_LEVEL': 'INFO',
             'DEV_MODE': 'false',
-            'DRY_RUN': 'false'
+            'DRY_RUN': 'false',
+            'MAX_RETRY_ATTEMPTS': '5',
+            'INITIAL_RETRY_DELAY': '1',
+            'SCHEDULE_POST_INTERVAL': '3600',  # Default: 1 hour
+            'WHATSAPP_ENABLED': 'false'
         }
 
         for key, default_val in default_values.items():
@@ -127,17 +144,29 @@ class Orchestrator:
             watch_path = self.config.get('WATCH_FOLDER_PATH', './watch_folder')
 
             # Create filesystem watcher
-            file_watcher = FileWatcher(vault_path=vault_path, watch_path=watch_path)
+            file_watcher = FileWatcher(vault_path=vault_path, check_interval=int(self.config.get('CHECK_INTERVAL', 60)))
             watchers.append(file_watcher)
             self.logger.info(f"Initialized FileWatcher monitoring {watch_path}")
 
             # Create Gmail watcher if credentials are available
             if self.config.get('GMAIL_CLIENT_ID') and self.config.get('GMAIL_CLIENT_SECRET'):
-                gmail_watcher = GmailWatcher(vault_path=vault_path)
+                gmail_watcher = GmailWatcher(vault_path=vault_path, check_interval=int(self.config.get('CHECK_INTERVAL', 60)))
                 watchers.append(gmail_watcher)
                 self.logger.info("Initialized GmailWatcher")
             else:
                 self.logger.info("Gmail credentials not found, skipping GmailWatcher initialization")
+
+            # For Silver Tier - Initialize additional watchers if needed
+            # WhatsApp watcher would be initialized here when available
+            whatsapp_enabled = self.config.get('WHATSAPP_ENABLED', '').lower() == 'true'
+            if whatsapp_enabled:
+                try:
+                    from watchers.whatsapp_watcher import WhatsAppWatcher
+                    whatsapp_watcher = WhatsAppWatcher(vault_path=vault_path, check_interval=int(self.config.get('CHECK_INTERVAL', 60)))
+                    watchers.append(whatsapp_watcher)
+                    self.logger.info("Initialized WhatsAppWatcher")
+                except ImportError:
+                    self.logger.info("WhatsAppWatcher not available, skipping initialization")
 
         except ImportError as e:
             self.logger.error(f"Could not import watcher: {e}")
@@ -146,40 +175,114 @@ class Orchestrator:
 
         return watchers
 
+    def monitor_approvals(self):
+        """
+        Monitor for approval status changes in Approved and Rejected folders.
+        This runs in a separate thread to continuously monitor for changes.
+        """
+        vault_path = self.config.get('VAULT_PATH', './ai-employee-vault')
+
+        while self.running:
+            try:
+                changes = scan_for_approval_changes(vault_path)
+
+                for change in changes:
+                    self.logger.info(f"Approval change detected: {change['status']} - {change['file_path']}")
+
+                    # Process the approval change based on the status
+                    if change['status'] == 'approved':
+                        self.handle_approved_action(change)
+                    elif change['status'] == 'rejected':
+                        self.handle_rejected_action(change)
+
+                # Sleep before next check
+                time.sleep(5)  # Check every 5 seconds
+
+            except Exception as e:
+                self.logger.error(f"Error in approval monitoring: {e}")
+                time.sleep(10)  # Wait longer before retry on error
+
+    def handle_approved_action(self, change: Dict):
+        """
+        Handle an approved action from the approval monitoring.
+
+        Args:
+            change: Dictionary containing the approval change information
+        """
+        self.logger.info(f"Processing approved action: {change['file_path']}")
+        # In a real implementation, this would execute the approved action
+        # For now, just log that it was approved
+
+    def handle_rejected_action(self, change: Dict):
+        """
+        Handle a rejected action from the approval monitoring.
+
+        Args:
+            change: Dictionary containing the rejection change information
+        """
+        self.logger.info(f"Processing rejected action: {change['file_path']}")
+        # In a real implementation, this would handle the rejection
+        # For now, just log that it was rejected
+
+    def start_approval_monitoring(self):
+        """
+        Start the approval monitoring thread.
+        """
+        self.approval_monitor_thread = threading.Thread(target=self.monitor_approvals, daemon=True)
+        self.approval_monitor_thread.start()
+        self.logger.info("Started approval monitoring thread")
+
+    def run_watchers_concurrently(self):
+        """
+        Run all initialized watchers concurrently using threads.
+        """
+        for i, watcher in enumerate(self.watchers):
+            watcher_thread = threading.Thread(target=watcher.run, name=f"WatcherThread-{i}", daemon=True)
+            self.watcher_threads.append(watcher_thread)
+            watcher_thread.start()
+            self.logger.info(f"Started watcher thread: {watcher_thread.name}")
+
+        # Keep the main thread alive to monitor the watcher threads
+        try:
+            while self.running:
+                # Check if any threads have died
+                for i, thread in enumerate(self.watcher_threads):
+                    if not thread.is_alive():
+                        self.logger.error(f"Watcher thread {thread.name} died unexpectedly, attempting restart...")
+                        # Restart the failed watcher
+                        if i < len(self.watchers):
+                            failed_watcher = self.watchers[i]
+                            restart_thread = threading.Thread(target=failed_watcher.run, name=f"Restarted-{failed_watcher.__class__.__name__}", daemon=True)
+                            self.watcher_threads[i] = restart_thread
+                            restart_thread.start()
+
+                time.sleep(5)  # Check every 5 seconds
+        except KeyboardInterrupt:
+            self.logger.info("Keyboard interrupt received, stopping watchers...")
+        except Exception as e:
+            self.logger.error(f"Error in watcher management: {e}")
+
     def run(self):
         """
         Main execution loop for the orchestrator.
-        Initializes watchers and runs them in sequence.
+        Initializes watchers and runs them concurrently.
         """
         self.logger.info("Starting Personal AI Employee Orchestrator...")
         self.logger.info(f"Configuration: {dict((k, '***' if 'KEY' in k or 'SECRET' in k or 'PASSWORD' in k else v) for k, v in self.config.items())}")
 
         # Initialize watchers
-        watchers = self.initialize_watchers()
+        self.watchers = self.initialize_watchers()
 
-        if not watchers:
+        if not self.watchers:
             self.logger.warning("No watchers initialized. Exiting.")
             return
 
-        # Run watchers (in a real implementation, this might run them in separate threads/processes)
-        self.logger.info(f"Starting {len(watchers)} watcher(s)...")
+        # Start approval monitoring (Silver Tier feature)
+        self.start_approval_monitoring()
 
-        # For now, we'll run the first watcher in a loop
-        # In a production implementation, you'd want to run multiple watchers concurrently
-        if watchers:
-            primary_watcher = watchers[0]
-            self.logger.info(f"Running primary watcher: {primary_watcher.__class__.__name__}")
-
-            try:
-                # This would typically run in a thread, but for simplicity we'll run directly
-                # In a real implementation, each watcher would run in its own thread/process
-                primary_watcher.run()
-            except KeyboardInterrupt:
-                self.logger.info("Interrupt received, shutting down...")
-            except Exception as e:
-                self.logger.error(f"Error running watcher: {e}")
-        else:
-            self.logger.error("No watchers available to run")
+        # Run watchers concurrently
+        self.logger.info(f"Starting {len(self.watchers)} watcher(s) concurrently...")
+        self.run_watchers_concurrently()
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -193,6 +296,8 @@ class Orchestrator:
             'status': 'healthy' if self.running else 'shutdown',
             'config_loaded': bool(self.config),
             'vault_accessible': Path(self.config.get('VAULT_PATH', './ai-employee-vault')).exists(),
+            'watchers_running': len([t for t in self.watcher_threads if t.is_alive()]),
+            'approval_monitor_active': self.approval_monitor_thread.is_alive() if self.approval_monitor_thread else False,
             'uptime': getattr(self, '_start_time', datetime.now()).isoformat()
         }
 
