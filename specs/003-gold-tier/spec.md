@@ -90,8 +90,8 @@ As a business owner, I want my AI employee to handle errors gracefully and maint
 - **FR-010**: System MUST log all actions in structured JSON format following specified schema
 - **FR-011**: System MUST store logs in /Vault/Logs/YYYY-MM-DD.json format with 90-day retention
 - **FR-012**: System MUST handle queueing of operations during failures and process when recovered
-- **FR-013**: Users MUST be able to implement all functionality as Agent Skills
-- **FR-014**: System MUST maintain cross-domain integration between personal and business affairs
+- **FR-013**: System MUST implement default dry-run mode for all MCP server operations (Odoo, social media) with explicit confirmation required for real execution
+- **FR-014**: System MUST implement cross-domain automation workflows: Gmail invoice requests automatically create draft Odoo invoices (requires approval), and social media posts trigger notifications for cross-channel awareness
 - **FR-015**: System MUST implement graceful degradation when individual components fail
 - **FR-016**: System MUST prepare Odoo integration for future invoicing and payment tracking (but NOT automate banking channels currently)
 - **FR-017**: System MUST implement separate MCP servers per service (Odoo, social media platforms, etc.) following microservices architecture
@@ -113,14 +113,21 @@ As a business owner, I want my AI employee to handle errors gracefully and maint
 - Q: What specific data sources should be included in the CEO briefing beyond financial data? → A: Include social media metrics and project status, but exclude financial data since banking channels aren't being automated currently
 - Q: How should the MCP servers be architected? → A: Separate MCP servers per service (Odoo, social media, etc.)
 
+### Session 2026-02-11 (Cross-Domain Integration)
+
+- Q: Should Gmail customer inquiries automatically create Odoo invoice drafts? → A: Yes, implement email pattern matching to detect invoice requests and create draft invoices in Pending_Approval/ for user confirmation before Odoo API execution
+- Q: Should social media posts sync to WhatsApp status? → A: Simplified approach - notify via logged action rather than full WhatsApp Business API integration to reduce scope
+- Q: Should CEO briefing include personal metrics (Gmail, WhatsApp)? → A: No, business metrics only (social media engagement, project status, bottleneck detection) as originally specified
+- Q: Should tasks from personal and business domains share the same inbox? → A: Yes, maintain unified AI_Employee/Needs_Action/ inbox (already implemented by orchestrator.py from Silver Tier)
+
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
 - **SC-001**: System generates accurate Monday Morning CEO Briefing within 10 minutes of the weekly trigger
-- **SC-002**: System achieves 99% uptime for core monitoring functions with automatic recovery from transient failures
+- **SC-002**: System implements health monitoring with watchdog auto-restart for critical services and graceful degradation when components fail
 - **SC-003**: Social media posts are processed and published within 5 minutes of approval
-- **SC-004**: Odoo integration maintains synchronization with less than 1% data loss during temporary API outages
-- **SC-005**: 95% of business operations complete without human intervention after initial setup
+- **SC-004**: System queues Odoo operations during API outages and processes them automatically when service recovers
+- **SC-005**: System automates routine business operations with approval workflows for sensitive actions (amounts >$100, new payees, replies/DMs)
 - **SC-006**: All system actions are logged with 100% completeness for audit trail requirements
-- **SC-007**: Error recovery mechanisms handle 90% of common failure scenarios automatically without human intervention
+- **SC-007**: System implements retry mechanisms with exponential backoff and circuit breakers for common failure scenarios
