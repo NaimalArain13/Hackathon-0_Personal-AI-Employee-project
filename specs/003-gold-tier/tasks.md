@@ -94,51 +94,51 @@ Project structure from plan.md:
 
 ### Implementation for User Story 3 - Facebook
 
-- [ ] T024 [P] [US3] Create mcp_server_facebook.py in .claude/mcp-servers/facebook-mcp/ with MCP server boilerplate
-- [ ] T025 [P] [US3] Create requirements.txt for facebook-mcp with facebook-sdk dependency
-- [ ] T026 [US3] Implement facebook_create_post tool in mcp_server_facebook.py per facebook-contract.md
-- [ ] T027 [US3] Implement facebook_get_page_insights tool in mcp_server_facebook.py
-- [ ] T028 [US3] Implement facebook_delete_post tool in mcp_server_facebook.py
-- [ ] T029 [US3] Implement facebook_get_post tool in mcp_server_facebook.py
-- [ ] T030 [US3] Create README.md for facebook-mcp with token setup instructions
+- [X] T024 [P] [US3] Create mcp_server_facebook.py in .claude/mcp-servers/facebook-mcp/ with MCP server boilerplate
+- [X] T025 [P] [US3] Create requirements.txt for facebook-mcp with facebook-sdk dependency
+- [X] T026 [US3] Implement facebook_create_post tool in mcp_server_facebook.py per facebook-contract.md
+- [X] T027 [US3] Implement facebook_get_page_insights tool in mcp_server_facebook.py
+- [X] T028 [US3] Implement facebook_delete_post tool in mcp_server_facebook.py
+- [X] T029 [US3] Implement facebook_get_post tool in mcp_server_facebook.py
+- [X] T030 [US3] Create README.md for facebook-mcp with token setup instructions
 
 ### Implementation for User Story 3 - Instagram
 
-- [ ] T031 [P] [US3] Create mcp_server_instagram.py in .claude/mcp-servers/instagram-mcp/ with MCP server boilerplate
-- [ ] T032 [P] [US3] Create requirements.txt for instagram-mcp with facebook-sdk dependency (Instagram uses Facebook Graph API)
-- [ ] T033 [US3] Implement instagram_create_post tool (container-based publishing) in mcp_server_instagram.py per instagram-contract.md
-- [ ] T034 [US3] Implement instagram_get_account_info tool in mcp_server_instagram.py
-- [ ] T035 [US3] Implement instagram_get_media_insights tool in mcp_server_instagram.py
-- [ ] T036 [US3] Implement instagram_get_recent_media tool in mcp_server_instagram.py
-- [ ] T037 [US3] Create README.md for instagram-mcp with Business Account setup instructions
+- [X] T031 [P] [US3] Create mcp_server_instagram.py in .claude/mcp-servers/instagram-mcp/ with MCP server boilerplate
+- [X] T032 [P] [US3] Create requirements.txt for instagram-mcp with facebook-sdk dependency (Instagram uses Facebook Graph API)
+- [X] T033 [US3] Implement instagram_create_post tool (container-based publishing) in mcp_server_instagram.py per instagram-contract.md
+- [X] T034 [US3] Implement instagram_get_account_info tool in mcp_server_instagram.py
+- [X] T035 [US3] Implement instagram_get_media_insights tool in mcp_server_instagram.py
+- [X] T036 [US3] Implement instagram_get_recent_media tool in mcp_server_instagram.py
+- [X] T037 [US3] Create README.md for instagram-mcp with Business Account setup instructions
 
 ### Implementation for User Story 3 - Twitter
 
-- [ ] T038 [P] [US3] Create mcp_server_twitter.py in .claude/mcp-servers/twitter-mcp/ with MCP server boilerplate
-- [ ] T039 [P] [US3] Create requirements.txt for twitter-mcp with tweepy dependency
-- [ ] T040 [US3] Implement twitter_create_tweet tool in mcp_server_twitter.py per twitter-contract.md
-- [ ] T041 [US3] Implement twitter_upload_media tool in mcp_server_twitter.py
-- [ ] T042 [US3] Implement twitter_delete_tweet tool in mcp_server_twitter.py
-- [ ] T043 [US3] Implement twitter_get_user_tweets tool in mcp_server_twitter.py
-- [ ] T044 [US3] Implement twitter_get_user_info tool in mcp_server_twitter.py
-- [ ] T045 [US3] Create README.md for twitter-mcp with API key setup instructions
+- [X] T038 [P] [US3] Create mcp_server_twitter.py in .claude/mcp-servers/twitter-mcp/ with MCP server boilerplate
+- [X] T039 [P] [US3] Create requirements.txt for twitter-mcp with tweepy dependency
+- [X] T040 [US3] Implement twitter_create_tweet tool in mcp_server_twitter.py per twitter-contract.md
+- [X] T041 [US3] Implement twitter_upload_media tool in mcp_server_twitter.py
+- [X] T042 [US3] Implement twitter_delete_tweet tool in mcp_server_twitter.py
+- [X] T043 [US3] Implement twitter_get_user_tweets tool in mcp_server_twitter.py
+- [X] T044 [US3] Implement twitter_get_user_info tool in mcp_server_twitter.py
+- [X] T045 [US3] Create README.md for twitter-mcp with API key setup instructions
 
 ### Implementation for User Story 3 - Unified Social Media Manager
 
-- [ ] T046 [US3] Create social_media_manager.py in utils/ with unified posting interface across all platforms
-- [ ] T047 [US3] Implement approval workflow for social media posts (auto-approve scheduled, require approval for replies/DMs) in social_media_manager.py
-- [ ] T048 [US3] Add content validation (character limits, media requirements) per platform in social_media_manager.py
-- [ ] T049 [US3] Integrate social media posting with filesystem_watcher.py for approval detection
-- [ ] T050 [US3] Add structured logging for all social media operations to /Vault/Logs/YYYY-MM-DD.json
-- [ ] T051 [US3] Add error handling with retry logic for transient failures (but NO retry on post creation per Principle X)
+- [X] T046 [US3] Create social_media_manager.py in utils/ with unified posting interface across all platforms
+- [X] T047 [US3] Implement approval workflow for social media posts (auto-approve scheduled, require approval for replies/DMs) in social_media_manager.py
+- [X] T048 [US3] Add content validation (character limits, media requirements) per platform in social_media_manager.py
+- [X] T049 [US3] Integrate social media posting with filesystem_watcher.py for approval detection
+- [X] T050 [US3] Add structured logging for all social media operations to /Vault/Logs/YYYY-MM-DD.json
+- [X] T051 [US3] Add error handling with retry logic for transient failures (but NO retry on post creation per Principle X)
 
 ### Dry Run Mode Implementation (Constitutional Requirement - Principle III)
 
-- [ ] T051A [US3] Implement dry_run parameter (default: true) for facebook_create_post tool in mcp_server_facebook.py
-- [ ] T051B [US3] Implement dry_run parameter (default: true) for instagram_create_post tool in mcp_server_instagram.py
-- [ ] T051C [US3] Implement dry_run parameter (default: true) for twitter_create_tweet tool in mcp_server_twitter.py
-- [ ] T051D [US3] Add dry_run validation in social_media_manager.py: when true, log action without posting to platforms
-- [ ] T051E [US3] Add dry_run status to structured JSON logs for all social media operations
+- [X] T051A [US3] Implement dry_run parameter (default: true) for facebook_create_post tool in mcp_server_facebook.py
+- [X] T051B [US3] Implement dry_run parameter (default: true) for instagram_create_post tool in mcp_server_instagram.py
+- [X] T051C [US3] Implement dry_run parameter (default: true) for twitter_create_tweet tool in mcp_server_twitter.py
+- [X] T051D [US3] Add dry_run validation in social_media_manager.py: when true, log action without posting to platforms
+- [X] T051E [US3] Add dry_run status to structured JSON logs for all social media operations
 
 **Checkpoint**: At this point, all social media platforms should be independently postable with approval workflows and dry-run safety
 
@@ -152,21 +152,21 @@ Project structure from plan.md:
 
 ### Implementation for User Story 1
 
-- [ ] T052 [P] [US1] Create audit_generator.py in utils/ with generate_weekly_audit() function per audit-contract.md
-- [ ] T053 [P] [US1] Create ceo_briefing_generator.py in utils/ with generate_ceo_briefing() function per audit-contract.md
-- [ ] T054 [US1] Implement log parsing logic in audit_generator.py to extract metrics from /Vault/Logs/YYYY-MM-DD.json
-- [ ] T055 [US1] Implement vault scanning logic in audit_generator.py (count tasks, plans, approvals from AI_Employee/)
-- [ ] T056 [US1] Implement audit metrics calculation (activity, communication, social media, tasks, approvals, errors, system health) in audit_generator.py
-- [ ] T057 [US1] Implement Markdown audit report generation in audit_generator.py
-- [ ] T058 [US1] Implement bottleneck detection rules in ceo_briefing_generator.py (>5 pending approvals, >10 errors from service, >20 pending tasks)
-- [ ] T059 [US1] Implement proactive suggestion generation in ceo_briefing_generator.py (repeat customer inquiries, high error rates, low engagement)
-- [ ] T060 [US1] Implement project status extraction from AI_Employee/Plans/*.md files in ceo_briefing_generator.py
-- [ ] T061 [US1] Implement Markdown briefing report generation in ceo_briefing_generator.py
-- [ ] T062 [US1] Integrate APScheduler in orchestrator.py with CronTrigger for Sunday 10pm execution
-- [ ] T063 [US1] Configure scheduler with coalesce=True and max_instances=1 to prevent concurrent runs
-- [ ] T064 [US1] Create weekly_audit_job() function in orchestrator.py to trigger audit then briefing generation
-- [ ] T065 [US1] Add structured logging for audit and briefing generation to /Vault/Logs/
-- [ ] T066 [US1] Add error alerting for failed audit/briefing generation (create alert file in Needs_Action/)
+- [X] T052 [P] [US1] Create audit_generator.py in utils/ with generate_weekly_audit() function per audit-contract.md
+- [X] T053 [P] [US1] Create ceo_briefing_generator.py in utils/ with generate_ceo_briefing() function per audit-contract.md
+- [X] T054 [US1] Implement log parsing logic in audit_generator.py to extract metrics from /Vault/Logs/YYYY-MM-DD.json
+- [X] T055 [US1] Implement vault scanning logic in audit_generator.py (count tasks, plans, approvals from AI_Employee/)
+- [X] T056 [US1] Implement audit metrics calculation (activity, communication, social media, tasks, approvals, errors, system health) in audit_generator.py
+- [X] T057 [US1] Implement Markdown audit report generation in audit_generator.py
+- [X] T058 [US1] Implement bottleneck detection rules in ceo_briefing_generator.py (>5 pending approvals, >10 errors from service, >20 pending tasks)
+- [X] T059 [US1] Implement proactive suggestion generation in ceo_briefing_generator.py (repeat customer inquiries, high error rates, low engagement)
+- [X] T060 [US1] Implement project status extraction from AI_Employee/Plans/*.md files in ceo_briefing_generator.py
+- [X] T061 [US1] Implement Markdown briefing report generation in ceo_briefing_generator.py
+- [X] T062 [US1] Integrate APScheduler in orchestrator.py with CronTrigger for Sunday 10pm execution
+- [X] T063 [US1] Configure scheduler with coalesce=True and max_instances=1 to prevent concurrent runs
+- [X] T064 [US1] Create weekly_audit_job() function in orchestrator.py to trigger audit then briefing generation
+- [X] T065 [US1] Add structured logging for audit and briefing generation to /Vault/Logs/
+- [X] T066 [US1] Add error alerting for failed audit/briefing generation (create alert file in Needs_Action/)
 
 **Checkpoint**: At this point, weekly audits and CEO briefings should generate automatically every Sunday night
 
@@ -180,24 +180,24 @@ Project structure from plan.md:
 
 ### Implementation for User Story 4
 
-- [ ] T067 [US4] Extend retry_handler.py to support service-specific retry policies (read operations: YES retry, write operations: NO retry per Principle X)
-- [ ] T068 [US4] Implement rate limit detection and backoff for each MCP server in retry_handler.py
-- [ ] T069 [US4] Add circuit breaker integration to all MCP server calls in action_executor.py
-- [ ] T070 [US4] Extend health_monitor.py to poll MCP servers every 30 seconds via health check endpoints
-- [ ] T071 [US4] Implement watchdog auto-restart logic in health_monitor.py (max 3 attempts, then alert)
-- [ ] T072 [US4] Create operation queue in action_executor.py for pending actions during MCP failures
-- [ ] T073 [US4] Implement queue processing logic to retry queued operations when service recovers
-- [ ] T074 [US4] Add error aggregation and reporting in health_monitor.py (track errors by service, time window)
-- [ ] T075 [US4] Implement graceful degradation strategy (continue other operations when one service fails)
-- [ ] T076 [US4] Add comprehensive error logging with stack traces and context to /Vault/Logs/
-- [ ] T077 [US4] Update orchestrator.py to start health_monitor and watchdog on Gold Tier mode
-- [ ] T078 [US4] Configure 90-day log retention policy (no auto-deletion per Principle IX)
+- [X] T067 [US4] Extend retry_handler.py to support service-specific retry policies (read operations: YES retry, write operations: NO retry per Principle X)
+- [X] T068 [US4] Implement rate limit detection and backoff for each MCP server in retry_handler.py
+- [X] T069 [US4] Add circuit breaker integration to all MCP server calls in action_executor.py
+- [X] T070 [US4] Extend health_monitor.py to poll MCP servers every 30 seconds via health check endpoints
+- [X] T071 [US4] Implement watchdog auto-restart logic in health_monitor.py (max 3 attempts, then alert)
+- [X] T072 [US4] Create operation queue in action_executor.py for pending actions during MCP failures
+- [X] T073 [US4] Implement queue processing logic to retry queued operations when service recovers
+- [X] T074 [US4] Add error aggregation and reporting in health_monitor.py (track errors by service, time window)
+- [X] T075 [US4] Implement graceful degradation strategy (continue other operations when one service fails)
+- [X] T076 [US4] Add comprehensive error logging with stack traces and context to /Vault/Logs/
+- [X] T077 [US4] Update orchestrator.py to start health_monitor and watchdog on Gold Tier mode
+- [X] T078 [US4] Configure 90-day log retention policy (no auto-deletion per Principle IX)
 
 ### Global Dry Run Enforcement (Constitutional Requirement - Principle III)
 
-- [ ] T078A [US4] Extend action_executor.py to check dry_run flag before executing ANY MCP action
-- [ ] T078B [US4] Add dry_run parameter validation: reject actions with dry_run=false unless explicitly approved
-- [ ] T078C [US4] Update all action execution logs to include dry_run status field
+- [X] T078A [US4] Extend action_executor.py to check dry_run flag before executing ANY MCP action
+- [X] T078B [US4] Add dry_run parameter validation: reject actions with dry_run=false unless explicitly approved
+- [X] T078C [US4] Update all action execution logs to include dry_run status field
 
 **Checkpoint**: All services should now have robust error handling, auto-recovery, graceful degradation, and constitutional dry-run compliance
 
@@ -211,14 +211,14 @@ Project structure from plan.md:
 
 ### Gmail → Odoo Invoice Automation
 
-- [ ] T079 [P] [XD] Create gmail_to_odoo_parser.py in utils/ to extract invoice details from email bodies
-- [ ] T080 [XD] Implement email pattern matching in gmail_to_odoo_parser.py (keywords: "invoice", "quote", "bill", "please send invoice")
-- [ ] T081 [XD] Implement invoice detail extraction (customer name, amount, line items, due date, description) using regex and NLP patterns
-- [ ] T082 [XD] Extend gmail_watcher.py to integrate with gmail_to_odoo_parser for invoice request detection
-- [ ] T083 [XD] Implement draft invoice creation workflow: parse email → create INVOICE_draft_YYYY-MM-DD.md → save to Pending_Approval/
-- [ ] T084 [XD] Add approval detection: when user moves draft from Pending_Approval/ to Approved/, trigger odoo_client.py to create invoice
-- [ ] T085 [XD] Add structured logging for all cross-domain Gmail→Odoo actions with domain linkage tags
-- [ ] T086 [XD] Add error handling: if parsing fails, create clarification request in Needs_Action/ for human review
+- [X] T079 [P] [XD] Create gmail_to_odoo_parser.py in utils/ to extract invoice details from email bodies
+- [X] T080 [XD] Implement email pattern matching in gmail_to_odoo_parser.py (keywords: "invoice", "quote", "bill", "please send invoice")
+- [X] T081 [XD] Implement invoice detail extraction (customer name, amount, line items, due date, description) using regex and NLP patterns
+- [X] T082 [XD] Extend gmail_watcher.py to integrate with gmail_to_odoo_parser for invoice request detection
+- [X] T083 [XD] Implement draft invoice creation workflow: parse email → create INVOICE_draft_YYYY-MM-DD.md → save to Pending_Approval/
+- [X] T084 [XD] Add approval detection: when user moves draft from Pending_Approval/ to Approved/, trigger odoo_client.py to create invoice
+- [X] T085 [XD] Add structured logging for all cross-domain Gmail→Odoo actions with domain linkage tags
+- [X] T086 [XD] Add error handling: if parsing fails, create clarification request in Needs_Action/ for human review
 
 **Checkpoint**: Gmail invoice requests automatically create draft invoices with full approval workflow and error handling
 

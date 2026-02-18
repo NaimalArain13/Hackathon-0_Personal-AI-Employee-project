@@ -15,12 +15,93 @@ import json
 import logging
 import time
 import hashlib
+import traceback
+import threading
+from collections import deque
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime, timedelta
 from decimal import Decimal
 from utils.setup_logger import setup_logger, log_structured_action
 from utils.file_utils import read_markdown_file
+from utils.social_media_manager import SocialMediaManager, Platform, PostType
+
+
+# ==================== Operation Queue (T072, T073) ====================
+
+class OperationQueue:
+    """
+    Thread-safe queue for pending MCP actions during service outages.
+
+    When a circuit breaker is OPEN, operations are queued here.
+    When the service recovers (circuit closes), queued operations are replayed.
+
+    Constitutional Compliance:
+        - Principle X: WRITE operations are queued but require fresh approval before replay
+        - Queue capacity: 500 operations max (avoid memory bloat)
+    """
+
+    MAX_SIZE = 500
+
+    def __init__(self):
+        self._queue: deque = deque()
+        self._lock = threading.Lock()
+        self._logger = logging.getLogger("OperationQueue")
+
+    def enqueue(self, action_type: str, payload: Dict[str, Any], operation_type: str = "read") -> bool:
+        """
+        Add an operation to the queue.
+
+        Args:
+            action_type: Action identifier (e.g., "odoo_create_invoice")
+            payload: Full operation payload
+            operation_type: "read" | "write" | "idempotent"
+
+        Returns:
+            True if enqueued, False if queue is full
+        """
+        with self._lock:
+            if len(self._queue) >= self.MAX_SIZE:
+                self._logger.warning(f"Operation queue full ({self.MAX_SIZE}). Dropping: {action_type}")
+                return False
+            entry = {
+                "action_type": action_type,
+                "payload": payload,
+                "operation_type": operation_type,
+                "queued_at": datetime.utcnow().isoformat(),
+            }
+            self._queue.append(entry)
+            self._logger.info(f"Queued operation: {action_type} (queue size: {len(self._queue)})")
+            return True
+
+    def drain(self) -> List[Dict[str, Any]]:
+        """
+        Drain and return all queued operations in FIFO order.
+
+        Returns:
+            List of queued operation dicts
+        """
+        with self._lock:
+            ops = list(self._queue)
+            self._queue.clear()
+            return ops
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+    def clear(self):
+        with self._lock:
+            self._queue.clear()
+
+
+# Module-level singleton queue
+_operation_queue = OperationQueue()
+
+
+def get_operation_queue() -> OperationQueue:
+    """Get the global operation queue singleton."""
+    return _operation_queue
 
 
 class ActionExecutor:
@@ -53,6 +134,210 @@ class ActionExecutor:
 
         # Logs folder for checking transaction history
         self.logs_folder = self.vault_path / "Logs"
+
+        # Social Media Manager (Gold Tier - T049)
+        try:
+            self.social_media_manager = SocialMediaManager(vault_path=str(self.vault_path))
+            self.logger.info("Social Media Manager initialized successfully")
+        except Exception as e:
+            self.logger.warning(f"Could not initialize Social Media Manager: {e}")
+            self.social_media_manager = None
+
+        # T075: Graceful degradation — failed services tracked here
+        self._degraded_services: set = set()
+
+        # T072: Operation queue for actions pending during outages
+        self._operation_queue = get_operation_queue()
+
+    # ========== T078A–C: Global Dry-Run Gate ====================
+
+    def _dry_run_gate(
+        self,
+        action_type: str,
+        dry_run: bool,
+        approval_status: str,
+        extra_log: Optional[Dict] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Global dry-run enforcement gate (Constitutional Principle III).
+
+        MUST be called before executing ANY MCP action that writes data.
+
+        Rules:
+        - dry_run=True  → always allow (safe simulation)
+        - dry_run=False + approval_status in {auto_approved, human_approved} → allow
+        - dry_run=False + any other approval_status → REJECT
+
+        Args:
+            action_type: Action name for logging
+            dry_run: Dry-run flag from caller
+            approval_status: Approval workflow status
+            extra_log: Additional context to include in structured log
+
+        Returns:
+            (allowed: bool, rejection_reason: Optional[str])
+        """
+        if dry_run:
+            # T078C: log dry_run status
+            self.logger.debug(f"[DRY RUN] {action_type}: simulation mode, no real API call")
+            log_structured_action(
+                action=f"{action_type}_dry_run_check",
+                actor="action_executor",
+                parameters={"action_type": action_type, "dry_run": True, **(extra_log or {})},
+                result={"status": "dry_run", "dry_run": True},
+                approval_status=approval_status,
+                vault_path=str(self.vault_path)
+            )
+            return True, None
+
+        approved_statuses = {"auto_approved", "human_approved"}
+        if approval_status not in approved_statuses:
+            reason = (
+                f"dry_run=false rejected for '{action_type}': "
+                f"approval_status='{approval_status}' not in {approved_statuses} "
+                f"(Constitutional Principle III)"
+            )
+            self.logger.error(reason)
+            # T078C: log rejection
+            log_structured_action(
+                action=f"{action_type}_dry_run_check",
+                actor="action_executor",
+                parameters={"action_type": action_type, "dry_run": False, **(extra_log or {})},
+                result={"status": "rejected", "dry_run": False, "reason": reason},
+                approval_status=approval_status,
+                vault_path=str(self.vault_path)
+            )
+            return False, reason
+
+        return True, None
+
+    # ========== T076: Comprehensive Error Logging ====================
+
+    def _log_error_with_trace(
+        self,
+        action: str,
+        exc: Exception,
+        context: Optional[Dict] = None,
+        approval_status: str = "not_required"
+    ):
+        """
+        Log an error with full stack trace and context to structured logs (T076).
+
+        Args:
+            action: Action that failed
+            exc: The exception
+            context: Additional context dict
+            approval_status: Approval status at time of failure
+        """
+        tb = traceback.format_exc()
+        self.logger.error(f"{action} failed: {exc}\n{tb}")
+
+        log_structured_action(
+            action=action,
+            actor="action_executor",
+            parameters=context or {},
+            result={"status": "error", "exception_type": type(exc).__name__},
+            approval_status=approval_status,
+            error=f"{type(exc).__name__}: {exc}\n{tb}",
+            vault_path=str(self.vault_path)
+        )
+
+    # ========== T075: Graceful Degradation ====================
+
+    def _mark_degraded(self, service: str):
+        """Mark a service as degraded so other services continue operating."""
+        if service not in self._degraded_services:
+            self._degraded_services.add(service)
+            self.logger.warning(
+                f"Service '{service}' marked degraded. "
+                f"Other services will continue. Degraded: {self._degraded_services}"
+            )
+
+    def _mark_recovered(self, service: str):
+        """Mark a service as recovered."""
+        self._degraded_services.discard(service)
+        if service in self._degraded_services:
+            self.logger.info(f"Service '{service}' recovered from degraded state")
+
+    def is_service_degraded(self, service: str) -> bool:
+        """Return True if service is currently degraded."""
+        return service in self._degraded_services
+
+    # ========== T073: Queue Processing ====================
+
+    def process_queued_operations(self) -> Dict[str, Any]:
+        """
+        Process queued operations after service recovery (T073).
+
+        Drains the operation queue and re-executes eligible operations.
+        Write operations require fresh approval before replay.
+
+        Returns:
+            Summary: {processed, skipped_writes, failed, succeeded}
+        """
+        ops = self._operation_queue.drain()
+        if not ops:
+            self.logger.info("process_queued_operations: queue is empty")
+            return {"processed": 0, "skipped_writes": 0, "failed": 0, "succeeded": 0}
+
+        self.logger.info(f"process_queued_operations: replaying {len(ops)} queued operation(s)")
+        stats = {"processed": len(ops), "skipped_writes": 0, "failed": 0, "succeeded": 0}
+
+        for op in ops:
+            action_type = op.get("action_type", "unknown")
+            operation_type = op.get("operation_type", "read")
+            payload = op.get("payload", {})
+            queued_at = op.get("queued_at", "unknown")
+
+            # Constitutional Principle X: WRITE operations require fresh approval, never auto-replay
+            if operation_type == "write":
+                self.logger.warning(
+                    f"Skipping queued WRITE '{action_type}' (queued at {queued_at}) — "
+                    f"requires fresh human approval per Principle X"
+                )
+                # Create Needs_Action alert for the skipped write
+                self._create_queued_write_alert(action_type, payload, queued_at)
+                stats["skipped_writes"] += 1
+                continue
+
+            # Replay read/idempotent operations
+            try:
+                self.logger.info(f"Replaying queued '{action_type}' (queued at {queued_at})")
+                result = self.execute_action_from_approval(
+                    action_type=action_type,
+                    metadata=payload,
+                    content=payload.get("content", "")
+                )
+                if result.get("status") == "success":
+                    stats["succeeded"] += 1
+                else:
+                    stats["failed"] += 1
+            except Exception as exc:
+                self._log_error_with_trace(f"queue_replay_{action_type}", exc, {"queued_at": queued_at})
+                stats["failed"] += 1
+
+        self.logger.info(f"Queue processing complete: {stats}")
+        return stats
+
+    def _create_queued_write_alert(self, action_type: str, payload: Dict, queued_at: str):
+        """Create Needs_Action alert for a skipped queued WRITE operation."""
+        try:
+            alert_dir = self.vault_path / "Needs_Action"
+            alert_dir.mkdir(exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            alert_file = alert_dir / f"QUEUED_WRITE_{action_type}_{ts}.md"
+            alert_file.write_text(
+                f"# Queued Write Operation Requires Re-Approval\n\n"
+                f"**Action**: {action_type}\n"
+                f"**Originally Queued At**: {queued_at}\n\n"
+                f"This write operation was queued during a service outage and "
+                f"**cannot be auto-replayed** per Constitutional Principle X.\n\n"
+                f"Please re-submit this action with fresh approval.\n\n"
+                f"```json\n{json.dumps(payload, indent=2)}\n```\n",
+                encoding="utf-8"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to create queued write alert: {e}")
 
     # ========== Approval Workflow Methods (T020) ==========
 
@@ -691,9 +976,18 @@ This Odoo transaction requires approval.
         try:
             platforms = frontmatter.get('platforms', [])
             dry_run = frontmatter.get('dry_run', True)  # Default to dry-run per Principle III
+            approval_status = frontmatter.get('approval_status', 'human_approved')
 
             if not platforms:
                 self.logger.error("No platforms specified for social media post")
+                return False
+
+            # T078A–B: Global dry-run gate
+            allowed, rejection_reason = self._dry_run_gate(
+                "social_media_post", dry_run, approval_status,
+                extra_log={"platforms": platforms}
+            )
+            if not allowed:
                 return False
 
             self.logger.info(f"Executing social media post to platforms: {platforms} (dry_run={dry_run})")
@@ -711,36 +1005,92 @@ This Odoo transaction requires approval.
                 actor="action_executor",
                 parameters=log_params,
                 result={'status': 'initiated'},
-                approval_status="human_approved",
+                approval_status=approval_status,
                 vault_path=str(self.vault_path)
             )
 
             results = {}
 
-            # Post to each platform
+            # Check if social_media_manager is available
+            if not self.social_media_manager:
+                self.logger.error("Social Media Manager not initialized")
+                return False
+
+            # Parse post content from frontmatter and body
+            post_content = frontmatter.get('content', body)
+            image_url = frontmatter.get('image_url')
+            link = frontmatter.get('link')
+
+            # T069: Import circuit breaker for social platforms
+            from utils.retry_handler import get_circuit_breaker, CircuitBreakerOpenError
+
+            # Post to each platform with circuit breaker protection (T069)
             for platform in platforms:
+                platform_lower = platform.lower()
+
+                # T075: Skip degraded services — continue with other platforms
+                if self.is_service_degraded(platform_lower):
+                    self.logger.warning(
+                        f"Skipping degraded platform '{platform_lower}' (graceful degradation)"
+                    )
+                    results[platform] = {'status': 'skipped', 'message': 'Service degraded'}
+                    continue
+
                 try:
-                    # Get circuit breaker for this platform
-                    from utils.retry_handler import get_circuit_breaker
+                    cb = get_circuit_breaker(platform_lower)
 
-                    cb = get_circuit_breaker(platform.lower())
-
-                    # Execute post with circuit breaker protection
-                    def post_action():
-                        if dry_run:
-                            self.logger.info(f"[DRY RUN] Would post to {platform}: {body[:100]}...")
-                            return {'status': 'success', 'dry_run': True}
+                    if platform_lower == 'facebook':
+                        result = cb.call(
+                            self.social_media_manager.post_to_facebook,
+                            message=post_content,
+                            link=link,
+                            photo_url=image_url,
+                            dry_run=dry_run
+                        )
+                    elif platform_lower == 'instagram':
+                        if not image_url:
+                            result = {'status': 'error', 'message': 'Instagram requires image_url'}
                         else:
-                            # In real implementation, call the appropriate MCP server
-                            # For now, log that we would post
-                            self.logger.info(f"Posting to {platform} via MCP server")
-                            return {'status': 'success', 'platform': platform}
+                            result = cb.call(
+                                self.social_media_manager.post_to_instagram,
+                                image_url=image_url,
+                                caption=post_content,
+                                dry_run=dry_run
+                            )
+                    elif platform_lower == 'twitter':
+                        result = cb.call(
+                            self.social_media_manager.post_to_twitter,
+                            text=post_content,
+                            dry_run=dry_run
+                        )
+                    else:
+                        result = {'status': 'error', 'message': f'Unknown platform: {platform}'}
 
-                    result = cb.call(post_action)
                     results[platform] = result
+                    self.logger.info(f"Post to {platform} result: {result.get('status')}")
 
+                    # T075: Mark recovered if it previously was degraded
+                    self._mark_recovered(platform_lower)
+
+                except CircuitBreakerOpenError as e:
+                    self.logger.warning(f"Circuit OPEN for {platform}: {e}")
+                    # T075: Graceful degradation — mark and continue with remaining platforms
+                    self._mark_degraded(platform_lower)
+                    results[platform] = {'status': 'error', 'message': f'Circuit open: {e}'}
+                    # T072: Queue for retry when service recovers (read-only metadata, not the post itself)
+                    self._operation_queue.enqueue(
+                        action_type=f"{platform_lower}_create_post",
+                        payload={"platform": platform_lower, "content_hash": hashlib.sha256(post_content.encode()).hexdigest()[:16]},
+                        operation_type="write"
+                    )
                 except Exception as e:
-                    self.logger.error(f"Error posting to {platform}: {e}")
+                    # T076: Log with stack trace
+                    self._log_error_with_trace(
+                        f"social_media_post_{platform_lower}", e,
+                        context={"platform": platform_lower, "dry_run": dry_run},
+                        approval_status=approval_status
+                    )
+                    self._mark_degraded(platform_lower)
                     results[platform] = {'status': 'error', 'error': str(e)}
 
             # Check if all posts succeeded
@@ -759,12 +1109,13 @@ This Odoo transaction requires approval.
             log_structured_action(
                 action="social_media_post",
                 actor="action_executor",
-                parameters=log_params_final,
+                parameters={**log_params_final, "dry_run": dry_run},  # T078C
                 result={
                     'status': 'success' if all_success else 'partial',
-                    'data': results
+                    'data': results,
+                    'dry_run': dry_run
                 },
-                approval_status="human_approved",
+                approval_status=approval_status,
                 duration_ms=duration_ms,
                 vault_path=str(self.vault_path)
             )
@@ -775,25 +1126,13 @@ This Odoo transaction requires approval.
             return all_success
 
         except Exception as e:
-            self.logger.error(f"Error executing social media post: {e}")
-
             duration_ms = int((time.time() - start_time) * 1000)
-
-            log_params_error = {}
-            if action_file_path:
-                log_params_error['file'] = action_file_path
-
-            log_structured_action(
-                action="social_media_post",
-                actor="action_executor",
-                parameters=log_params_error,
-                result={'status': 'error'},
-                approval_status="human_approved",
-                duration_ms=duration_ms,
-                error=str(e),
-                vault_path=str(self.vault_path)
+            # T076: Comprehensive error logging with stack trace
+            self._log_error_with_trace(
+                "social_media_post", e,
+                context={"file": action_file_path, "dry_run": frontmatter.get("dry_run", True)},
+                approval_status=frontmatter.get("approval_status", "human_approved")
             )
-
             return False
 
     def _execute_odoo_transaction(self, action_file_path: str, frontmatter: Dict, body: str) -> bool:
@@ -822,15 +1161,31 @@ This Odoo transaction requires approval.
         try:
             transaction_type = frontmatter.get('transaction_type')
             dry_run = frontmatter.get('dry_run', True)  # Default to dry-run per Principle III
+            approval_status = frontmatter.get('approval_status', 'human_approved')
 
             if not transaction_type:
                 self.logger.error("No transaction_type specified for Odoo transaction")
                 return False
 
-            self.logger.info(f"Executing Odoo transaction: {transaction_type} (dry_run={dry_run})")
+            # T078A–B: Global dry-run gate
+            allowed, rejection_reason = self._dry_run_gate(
+                "odoo_transaction", dry_run, approval_status,
+                extra_log={"transaction_type": transaction_type}
+            )
+            if not allowed:
+                return False
 
-            # Determine approval status (T020)
-            approval_status = frontmatter.get('approval_status', 'human_approved')
+            # T075: Check graceful degradation
+            if self.is_service_degraded("odoo"):
+                self.logger.warning("Odoo is degraded — queuing transaction for retry")
+                self._operation_queue.enqueue(
+                    action_type=f"odoo_{transaction_type}",
+                    payload=dict(frontmatter),
+                    operation_type="write"
+                )
+                return False
+
+            self.logger.info(f"Executing Odoo transaction: {transaction_type} (dry_run={dry_run})")
 
             # Log the action execution start
             log_params = {
@@ -910,28 +1265,18 @@ This Odoo transaction requires approval.
             return success
 
         except Exception as e:
-            self.logger.error(f"Error executing Odoo transaction: {e}")
-
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            # Get approval status if available
-            approval_status_error = frontmatter.get('approval_status', 'human_approved') if frontmatter else 'unknown'
-
-            log_params_error = {}
-            if action_file_path:
-                log_params_error['file'] = action_file_path
-
-            log_structured_action(
-                action="odoo_transaction",
-                actor="action_executor",
-                parameters=log_params_error,
-                result={'status': 'error'},
-                approval_status=approval_status_error,
-                duration_ms=duration_ms,
-                error=str(e),
-                vault_path=str(self.vault_path)
+            # T075: Mark Odoo as degraded on failure
+            self._mark_degraded("odoo")
+            # T076: Log with full stack trace
+            self._log_error_with_trace(
+                "odoo_transaction", e,
+                context={
+                    "transaction_type": frontmatter.get("transaction_type"),
+                    "dry_run": frontmatter.get("dry_run", True),
+                    "file": action_file_path
+                },
+                approval_status=frontmatter.get("approval_status", "human_approved") if frontmatter else "unknown"
             )
-
             return False
 
     def _move_to_done(self, action_file_path: str) -> bool:
@@ -985,6 +1330,9 @@ This Odoo transaction requires approval.
                 success = self._execute_social_media_post_from_metadata(metadata, content)
             elif action_type == 'odoo_transaction':
                 success = self._execute_odoo_transaction_from_metadata(metadata, content)
+            elif action_type == 'odoo_invoice':
+                # T084: Cross-domain Gmail→Odoo invoice creation (Phase 6.5)
+                success = self._execute_odoo_invoice_from_approval(metadata, content)
             elif action_type == 'gmail_response':
                 success = self._execute_gmail_response(None, metadata, content)
             elif action_type == 'whatsapp_response':
@@ -1019,6 +1367,176 @@ This Odoo transaction requires approval.
     def _execute_odoo_transaction_from_metadata(self, metadata: Dict, content: str) -> bool:
         """Helper to execute Odoo transaction from metadata (no file path)."""
         return self._execute_odoo_transaction(None, metadata, content)
+
+    def _execute_odoo_invoice_from_approval(self, metadata: Dict, content: str) -> bool:
+        """
+        T084: Create an Odoo invoice from an approved gmail_to_odoo draft.
+
+        Called by execute_action_from_approval() when action_type='odoo_invoice'.
+        The metadata comes from the YAML frontmatter of the draft file created by
+        gmail_to_odoo_parser.create_invoice_draft().
+
+        Constitutional Compliance:
+            - Principle II:  Human moved file to Approved/ → explicit approval
+            - Principle III: dry_run=False only because of that explicit approval
+            - Principle X:   Invoice creation is WRITE — never auto-retried
+
+        Args:
+            metadata: YAML frontmatter dict from the approved draft file
+            content:  Markdown body (informational only)
+
+        Returns:
+            True on success, False on error
+        """
+        customer_name = metadata.get('customer_name', '')
+        customer_email = metadata.get('customer_email', '')
+        total_amount = float(metadata.get('total_amount', 0))
+        due_date = metadata.get('due_date')
+        line_items_raw = metadata.get('line_items') or []
+        domain_link = metadata.get('domain_link', 'gmail_to_odoo')
+        source_email_id = metadata.get('source_email_id', '')
+
+        # T085: Structured log with domain_link tag
+        log_structured_action(
+            action="odoo_invoice_approval_processing",
+            actor="action_executor",
+            parameters={
+                'customer_name': customer_name,
+                'customer_email': customer_email,
+                'total_amount': total_amount,
+                'due_date': due_date,
+                'domain_link': domain_link,
+                'source_email_id': source_email_id,
+            },
+            result={'status': 'processing'},
+            approval_status="human_approved",
+            vault_path=str(self.vault_path),
+        )
+
+        try:
+            from utils.odoo_client import OdooClient, OdooConnectionError
+
+            odoo = OdooClient(vault_path=str(self.vault_path))
+            odoo.connect()
+
+            # --- Find partner in Odoo by email then name ---
+            partner_id = None
+
+            if customer_email:
+                partners = odoo.get_partner(search_term=customer_email)
+                if partners:
+                    first = partners[0] if isinstance(partners, list) else partners
+                    partner_id = first.get('id')
+
+            if not partner_id and customer_name:
+                partners = odoo.get_partner(search_term=customer_name)
+                if partners:
+                    first = partners[0] if isinstance(partners, list) else partners
+                    partner_id = first.get('id')
+
+            if not partner_id:
+                # Partner not found → create Needs_Action alert; cannot create invoice
+                alert_dir = self.vault_path / "Needs_Action"
+                alert_dir.mkdir(exist_ok=True)
+                ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                alert = alert_dir / f"ODOO_PARTNER_NOT_FOUND_{ts}.md"
+                alert.write_text(
+                    f"# Odoo Partner Not Found\n\n"
+                    f"Cannot create invoice: customer '{customer_name}' / "
+                    f"'{customer_email}' not found in Odoo.\n\n"
+                    f"Please create the partner in Odoo first, then re-create the invoice manually.\n\n"
+                    f"**Amount**: ${total_amount:.2f}\n"
+                    f"**Due Date**: {due_date}\n"
+                    f"**Source Email ID**: {source_email_id}\n"
+                )
+                self.logger.warning(
+                    f"Odoo partner not found for '{customer_name}' / '{customer_email}'"
+                )
+                log_structured_action(
+                    action="odoo_invoice_partner_not_found",
+                    actor="action_executor",
+                    parameters={
+                        'customer_name': customer_name,
+                        'customer_email': customer_email,
+                        'domain_link': domain_link,
+                    },
+                    result={'status': 'error', 'reason': 'partner_not_found'},
+                    approval_status="human_approved",
+                    vault_path=str(self.vault_path),
+                )
+                return False
+
+            # --- Build invoice lines from YAML metadata ---
+            invoice_lines = []
+            for item in line_items_raw:
+                if isinstance(item, dict):
+                    invoice_lines.append({
+                        'description': item.get('description', 'Service'),
+                        'quantity': int(item.get('quantity', 1)),
+                        'unit_price': float(item.get('unit_price', total_amount)),
+                        'tax_ids': [],
+                    })
+
+            if not invoice_lines:
+                # Fallback: single line item from total
+                invoice_lines = [{
+                    'description': f"Invoice from email request (ID: {source_email_id})",
+                    'quantity': 1,
+                    'unit_price': total_amount,
+                    'tax_ids': [],
+                }]
+
+            # T084: Create invoice — dry_run=False (human has approved)
+            result = odoo.create_invoice(
+                partner_id=partner_id,
+                invoice_lines=invoice_lines,
+                due_date=due_date,
+                dry_run=False,
+            )
+
+            success = result.get('status') == 'success'
+
+            # T085: Structured log with domain_link tag
+            log_structured_action(
+                action="odoo_invoice_created",
+                actor="action_executor",
+                parameters={
+                    'partner_id': partner_id,
+                    'total_amount': total_amount,
+                    'due_date': due_date,
+                    'line_items_count': len(invoice_lines),
+                    'domain_link': domain_link,
+                    'source_email_id': source_email_id,
+                },
+                result=result,
+                approval_status="human_approved",
+                vault_path=str(self.vault_path),
+            )
+
+            if success:
+                self.logger.info(
+                    f"Odoo invoice created: ID={result.get('invoice_id')} "
+                    f"#{result.get('invoice_number')} "
+                    f"total=${result.get('total_amount', total_amount):.2f}"
+                )
+            else:
+                self.logger.error(f"Odoo invoice creation failed: {result}")
+
+            return success
+
+        except Exception as exc:
+            # T076: Log with full stack trace
+            self._log_error_with_trace(
+                "odoo_invoice_from_approval",
+                exc,
+                context={
+                    'customer': customer_name,
+                    'amount': total_amount,
+                    'domain_link': domain_link,
+                },
+                approval_status="human_approved",
+            )
+            return False
 
     def execute_odoo_transaction_with_approval(
         self,

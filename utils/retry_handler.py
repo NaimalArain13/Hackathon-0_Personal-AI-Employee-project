@@ -380,6 +380,175 @@ def handle_rate_limit(
     return delay
 
 
+# ==================== Service-Specific Retry Policies (T067) ====================
+
+from dataclasses import dataclass, field as dc_field
+
+
+@dataclass
+class ServiceRetryPolicy:
+    """
+    Per-service retry policy configuration.
+
+    Constitutional Compliance:
+        - Principle X: write_allowed=False means NO retry on destructive operations
+        - read_max_attempts: how many times to retry reads
+        - rate_limit_base_delay: first backoff for 429 errors
+    """
+    service_name: str
+    read_max_attempts: int = 5
+    write_allowed: bool = False         # Principle X: writes NEVER retry
+    idempotent_max_attempts: int = 3    # Safe to retry (idempotent PUT)
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    rate_limit_base_delay: float = 60.0
+    rate_limit_max_delay: float = 300.0
+
+
+# Default policies per service (conservative for financial/social operations)
+_SERVICE_POLICIES: dict = {
+    "odoo": ServiceRetryPolicy(
+        service_name="odoo",
+        read_max_attempts=5,
+        write_allowed=False,
+        rate_limit_base_delay=120.0,    # Odoo rate limits are rare but severe
+    ),
+    "facebook": ServiceRetryPolicy(
+        service_name="facebook",
+        read_max_attempts=5,
+        write_allowed=False,
+        rate_limit_base_delay=60.0,
+    ),
+    "instagram": ServiceRetryPolicy(
+        service_name="instagram",
+        read_max_attempts=5,
+        write_allowed=False,
+        rate_limit_base_delay=60.0,
+    ),
+    "twitter": ServiceRetryPolicy(
+        service_name="twitter",
+        read_max_attempts=5,
+        write_allowed=False,
+        rate_limit_base_delay=15.0,     # Twitter API v2 windows are short
+    ),
+    "gmail": ServiceRetryPolicy(
+        service_name="gmail",
+        read_max_attempts=5,
+        write_allowed=False,
+        rate_limit_base_delay=30.0,
+    ),
+}
+
+
+def get_service_policy(service_name: str) -> ServiceRetryPolicy:
+    """
+    Get retry policy for a named service.
+    Falls back to a conservative default if service is unknown.
+
+    Args:
+        service_name: Name of the service (e.g., "odoo", "facebook")
+
+    Returns:
+        ServiceRetryPolicy for the service
+    """
+    return _SERVICE_POLICIES.get(
+        service_name,
+        ServiceRetryPolicy(service_name=service_name)
+    )
+
+
+def retry_with_service_policy(
+    func: Callable,
+    service_name: str,
+    operation_type: "OperationType" = None,
+    exceptions: tuple = (Exception,),
+    on_retry: Optional[Callable[[int, Exception], None]] = None
+) -> Any:
+    """
+    Retry a function using the registered ServiceRetryPolicy (T067 + T068).
+
+    Combines:
+    - Per-service max_attempts and delays
+    - Constitutional Principle X enforcement (no write retries)
+    - Rate limit detection and extended backoff (T068)
+
+    Args:
+        func: Zero-argument callable to retry
+        service_name: Service name for policy lookup
+        operation_type: READ | WRITE | IDEMPOTENT (defaults to READ)
+        exceptions: Exception types to catch
+        on_retry: Optional callback(attempt, exception) before each retry
+
+    Returns:
+        Result of func() on success
+
+    Raises:
+        Last exception if all attempts exhausted
+    """
+    if operation_type is None:
+        operation_type = OperationType.READ
+
+    policy = get_service_policy(service_name)
+
+    # Constitutional enforcement: WRITE operations NEVER retry (Principle X)
+    if operation_type == OperationType.WRITE:
+        logger.warning(
+            f"[{service_name}] WRITE operation — forcing max_attempts=1 (Principle X)"
+        )
+        max_attempts = 1
+        base_delay = policy.base_delay
+        max_delay = policy.max_delay
+    elif operation_type == OperationType.IDEMPOTENT:
+        max_attempts = policy.idempotent_max_attempts
+        base_delay = policy.base_delay
+        max_delay = policy.max_delay
+    else:
+        max_attempts = policy.read_max_attempts
+        base_delay = policy.base_delay
+        max_delay = policy.max_delay
+
+    last_exception = None
+
+    for attempt in range(max_attempts):
+        try:
+            result = func()
+            if attempt > 0:
+                logger.info(f"[{service_name}] Retry succeeded after {attempt} attempt(s)")
+            return result
+
+        except exceptions as exc:
+            last_exception = exc
+
+            if attempt == max_attempts - 1:
+                logger.error(f"[{service_name}] All {max_attempts} attempts failed: {exc}")
+                raise
+
+            # T068: Rate limit detection — use extended backoff
+            if detect_rate_limit(exc):
+                delay = handle_rate_limit(
+                    exc,
+                    base_delay=policy.rate_limit_base_delay,
+                    max_delay=policy.rate_limit_max_delay
+                )
+                logger.warning(
+                    f"[{service_name}] Rate limit detected on attempt {attempt + 1}/{max_attempts}. "
+                    f"Backing off {delay:.0f}s"
+                )
+            else:
+                delay = exponential_backoff_with_jitter(attempt, base_delay, max_delay)
+                logger.warning(
+                    f"[{service_name}] Attempt {attempt + 1}/{max_attempts} failed: {exc}. "
+                    f"Retrying in {delay:.2f}s"
+                )
+
+            if on_retry:
+                on_retry(attempt, exc)
+
+            time.sleep(delay)
+
+    raise last_exception
+
+
 # Global circuit breakers for each service (singleton pattern)
 _circuit_breakers = {}
 

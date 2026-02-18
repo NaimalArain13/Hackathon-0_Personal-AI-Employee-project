@@ -49,10 +49,15 @@ class HealthMonitor:
         self.watchdog_last_restart_time = {}  # service_name -> timestamp
         self.watchdog_restart_window = 300  # Reset count after 5 minutes
 
-        # Gold Tier: Error aggregation
-        self.error_counts = {}  # service_name -> error_count
+        # Gold Tier: Error aggregation (T074 — windowed buckets per service)
+        self.error_counts = {}          # service_name -> error_count (current window)
         self.error_window_start = datetime.now()
-        self.error_window_seconds = 60  # Track errors per minute
+        self.error_window_seconds = 3600  # 1-hour window for reporting (T074)
+        self.error_history: Dict[str, List[Dict]] = {}  # service -> [{ts, msg}, ...]
+
+        # T070: Separate 30s MCP polling thread
+        self._mcp_poll_thread: Optional[threading.Thread] = None
+        self._mcp_poll_running = False
 
         # Gold Tier: MCP server registry
         self.mcp_servers = {
@@ -139,40 +144,246 @@ class HealthMonitor:
             self.mcp_servers[service_name]['enabled'] = False
             self.logger.info(f"Watchdog disabled for service: {service_name}")
 
+    # ==================== T070: 30-Second MCP Polling Loop ====================
+
+    def start_mcp_polling(self, poll_interval: int = 30):
+        """
+        Start dedicated MCP server health polling every 30 seconds (T070).
+
+        Runs in a separate daemon thread alongside the general health monitor.
+        Triggers watchdog auto-restart when a circuit is OPEN (T071).
+
+        Args:
+            poll_interval: Polling interval in seconds (default: 30)
+        """
+        if self._mcp_poll_running:
+            self.logger.warning("MCP polling already running")
+            return
+
+        self._mcp_poll_running = True
+
+        def _poll_loop():
+            self.logger.info(f"MCP polling started (interval={poll_interval}s)")
+            while self._mcp_poll_running:
+                try:
+                    self._mcp_poll_loop()
+                except Exception as exc:
+                    self.logger.error(f"MCP poll iteration error: {exc}")
+                time.sleep(poll_interval)
+            self.logger.info("MCP polling stopped")
+
+        self._mcp_poll_thread = threading.Thread(target=_poll_loop, daemon=True, name="MCP-Poll")
+        self._mcp_poll_thread.start()
+
+    def stop_mcp_polling(self):
+        """Stop the MCP polling thread."""
+        self._mcp_poll_running = False
+        if self._mcp_poll_thread:
+            self._mcp_poll_thread.join(timeout=5)
+
+    def _mcp_poll_loop(self):
+        """
+        Single iteration of MCP health polling (T070 + T071).
+
+        For each enabled MCP server:
+        - Reads circuit breaker state
+        - If OPEN: attempts watchdog restart (T071)
+        - Logs health status to structured log
+        """
+        for service_name, info in self.mcp_servers.items():
+            if not info.get('enabled', False):
+                continue
+
+            try:
+                from utils.retry_handler import get_circuit_breaker
+                cb = get_circuit_breaker(service_name)
+                state = cb.get_state()
+
+                info['last_check'] = datetime.now()
+                info['status'] = state['state']
+
+                if state['state'] == 'open':
+                    self.logger.warning(
+                        f"[MCP Poll] {service_name} circuit OPEN "
+                        f"({state['failure_count']} failures). Triggering watchdog."
+                    )
+                    # T071: Watchdog auto-restart
+                    self.attempt_service_restart(service_name)
+
+                elif state['state'] == 'half_open':
+                    self.logger.info(f"[MCP Poll] {service_name} circuit HALF_OPEN (recovering)")
+
+                # Structured log for monitoring dashboards
+                log_structured_action(
+                    action="mcp_health_poll",
+                    actor="health_monitor",
+                    parameters={"service": service_name, "poll_interval_s": 30},
+                    result={"status": "success", "circuit_state": state['state'],
+                            "failure_count": state['failure_count']},
+                    approval_status="not_required",
+                    vault_path=str(self.vault_path)
+                )
+
+            except Exception as exc:
+                self.logger.error(f"[MCP Poll] Error polling {service_name}: {exc}")
+
+    # ==================== T074: Enhanced Error Aggregation ====================
+
     def record_error(self, service_name: str, error: Exception):
         """
-        Record an error for a specific service (Gold Tier error aggregation).
+        Record an error for a specific service with time-windowed aggregation (T074).
+
+        Maintains:
+        - Current-window counts (resets every error_window_seconds)
+        - Rolling history of recent errors per service (last 100 per service)
 
         Args:
             service_name: Name of the service that errored
             error: The exception that occurred
         """
-        # Reset window if needed
-        if (datetime.now() - self.error_window_start).total_seconds() > self.error_window_seconds:
-            self.error_counts = {}
-            self.error_window_start = datetime.now()
+        now = datetime.now()
 
-        # Increment error count
+        # Reset window if expired
+        if (now - self.error_window_start).total_seconds() > self.error_window_seconds:
+            self.logger.info(
+                f"Error window expired — resetting counts. "
+                f"Previous: {self.error_counts}"
+            )
+            self.error_counts = {}
+            self.error_window_start = now
+
+        # Increment current-window count
         self.error_counts[service_name] = self.error_counts.get(service_name, 0) + 1
 
+        # Maintain rolling history
+        if service_name not in self.error_history:
+            self.error_history[service_name] = []
+        self.error_history[service_name].append({
+            'timestamp': now.isoformat(),
+            'message': str(error),
+            'type': type(error).__name__
+        })
+        # Cap history at 100 entries per service
+        if len(self.error_history[service_name]) > 100:
+            self.error_history[service_name] = self.error_history[service_name][-100:]
+
         self.logger.warning(
-            f"Error recorded for {service_name}: {error} "
-            f"(Total: {self.error_counts[service_name]} in current window)"
+            f"Error recorded for '{service_name}': {error} "
+            f"(Window total: {self.error_counts[service_name]})"
+        )
+
+        # Structured log for audit trail
+        log_structured_action(
+            action="error_recorded",
+            actor="health_monitor",
+            parameters={"service": service_name, "window_seconds": self.error_window_seconds},
+            result={
+                "status": "recorded",
+                "window_count": self.error_counts[service_name],
+                "error_type": type(error).__name__
+            },
+            approval_status="not_required",
+            vault_path=str(self.vault_path)
         )
 
     def get_error_report(self) -> Dict:
         """
-        Get aggregated error report for all services.
+        Get aggregated error report for all services (T074).
 
         Returns:
-            Dictionary with error counts by service
+            Dictionary with error counts, history, and time window
         """
+        window_elapsed = (datetime.now() - self.error_window_start).total_seconds()
         return {
             'window_start': self.error_window_start.isoformat(),
             'window_seconds': self.error_window_seconds,
+            'window_elapsed_seconds': round(window_elapsed),
             'errors_by_service': dict(self.error_counts),
-            'total_errors': sum(self.error_counts.values())
+            'total_errors': sum(self.error_counts.values()),
+            'error_history_counts': {s: len(h) for s, h in self.error_history.items()}
         }
+
+    def get_error_history(self, service_name: str, last_n: int = 20) -> List[Dict]:
+        """
+        Get recent error history for a specific service (T074).
+
+        Args:
+            service_name: Service name
+            last_n: Return last N errors
+
+        Returns:
+            List of error dicts with timestamp, message, type
+        """
+        history = self.error_history.get(service_name, [])
+        return history[-last_n:]
+
+    # ==================== T078: Log Retention Check ====================
+
+    def check_log_retention(self, retention_days: int = 90) -> Dict:
+        """
+        Check structured log files and warn about retention policy compliance (T078).
+
+        Constitutional Principle IX: 90-day retention — logs are NEVER auto-deleted.
+        This method ONLY reports; it never deletes.
+
+        Args:
+            retention_days: Expected retention window in days (default: 90)
+
+        Returns:
+            Report dict with oldest_log_date, total_log_files, compliance_status
+        """
+        log_dir = self.vault_path / 'Logs'
+        if not log_dir.exists():
+            return {
+                'log_dir': str(log_dir),
+                'exists': False,
+                'compliance_status': 'no_logs'
+            }
+
+        log_files = sorted(log_dir.glob('*.json'))
+        if not log_files:
+            return {
+                'log_dir': str(log_dir),
+                'exists': True,
+                'total_log_files': 0,
+                'compliance_status': 'no_logs'
+            }
+
+        oldest_file = log_files[0]
+        newest_file = log_files[-1]
+
+        try:
+            oldest_date = datetime.strptime(oldest_file.stem, '%Y-%m-%d')
+            days_retained = (datetime.now() - oldest_date).days
+        except ValueError:
+            oldest_date = None
+            days_retained = None
+
+        # Warn if logs are being deleted (fewer days than expected)
+        if days_retained is not None and days_retained < retention_days:
+            self.logger.warning(
+                f"Log retention check: only {days_retained} days of logs found "
+                f"(expected {retention_days}). Oldest: {oldest_file.name}. "
+                f"NOTE: Logs must NOT be auto-deleted per Constitutional Principle IX."
+            )
+            compliance_status = 'warning_short_retention'
+        else:
+            compliance_status = 'compliant'
+
+        report = {
+            'log_dir': str(log_dir),
+            'exists': True,
+            'total_log_files': len(log_files),
+            'oldest_log': oldest_file.name,
+            'newest_log': newest_file.name,
+            'days_retained': days_retained,
+            'retention_days_required': retention_days,
+            'compliance_status': compliance_status,
+            'note': 'Logs are NEVER auto-deleted per Constitutional Principle IX'
+        }
+
+        self.logger.info(f"Log retention check: {report}")
+        return report
 
     def check_mcp_server_health(self, service_name: str) -> Dict:
         """

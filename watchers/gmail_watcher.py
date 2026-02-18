@@ -37,6 +37,14 @@ from utils.file_utils import create_action_file as create_standard_action_file, 
 from utils.conflict_resolver import get_conflict_resolver
 from watchers.utils import get_file_metadata, create_markdown_frontmatter, sanitize_filename, format_timestamp
 
+# T082: Cross-domain Gmail → Odoo invoice detection (Phase 6.5)
+from utils.gmail_to_odoo_parser import (
+    detect_invoice_request,
+    extract_invoice_details,
+    create_invoice_draft,
+    create_clarification_request,
+)
+
 
 class GmailWatcher(BaseWatcher):
     """
@@ -571,6 +579,60 @@ class GmailWatcher(BaseWatcher):
 
         return False
 
+    def _route_email_to_handler(self, email: dict):
+        """
+        T082: Route an email to the appropriate handler.
+
+        Invoice-request emails are handled by the Gmail→Odoo cross-domain
+        workflow (create_invoice_draft or create_clarification_request).
+        All other emails fall through to the standard create_action_file path.
+
+        Returns:
+            Path to the created file, or None if no file was created.
+        """
+        is_invoice, confidence = detect_invoice_request(email)
+
+        if is_invoice:
+            self.logger.info(
+                f"Invoice request detected (confidence={confidence:.0%}) "
+                f"in email from {email.get('from', 'unknown')}"
+            )
+            try:
+                details = extract_invoice_details(email)
+
+                if details.is_complete:
+                    draft_path = create_invoice_draft(
+                        email, details, vault_path=str(self.vault_path)
+                    )
+                    if draft_path:
+                        return draft_path
+                    # Draft write failed — fall through to standard path
+                    self.logger.warning("Invoice draft write failed; falling back to standard action file")
+                    return self.create_action_file(email)
+
+                # Not enough data — create a clarification request
+                missing = []
+                if not (details.customer_name or details.customer_email):
+                    missing.append("customer name/email")
+                if details.total_amount == 0:
+                    missing.append("amount")
+                reason = "Missing: " + ", ".join(missing) if missing else "Insufficient invoice data"
+
+                clarif_path = create_clarification_request(
+                    email, reason, vault_path=str(self.vault_path)
+                )
+                return clarif_path
+
+            except Exception as exc:
+                self.logger.error(f"Invoice parsing error for email {email.get('id', '')}: {exc}")
+                clarif_path = create_clarification_request(
+                    email, str(exc), vault_path=str(self.vault_path)
+                )
+                return clarif_path
+
+        # Standard path: create action/approval file
+        return self.create_action_file(email)
+
     def run(self):
         """
         Main execution loop for the Gmail watcher.
@@ -591,25 +653,26 @@ class GmailWatcher(BaseWatcher):
                     self.logger.info(f"Found {len(new_emails)} new emails")
 
                     for email in new_emails:
-                        # Create action file for each new email
-                        action_file_path = self.create_action_file(email)
+                        # T082: Route invoice-request emails to the Gmail→Odoo workflow
+                        # before falling back to the standard action-file path.
+                        action_file_path = self._route_email_to_handler(email)
 
                         if action_file_path:
                             self.logger.info(f"Created action file: {action_file_path}")
 
-                            # Mark email as read after creating action file
-                            def _mark_as_read_operation():
-                                return self.gmail_service.users().messages().modify(
-                                    userId='me',
-                                    id=email['id'],
-                                    body={'removeLabelIds': ['UNREAD']}
-                                ).execute()
+                        # Mark email as read after processing (regardless of routing path)
+                        def _mark_as_read_operation():
+                            return self.gmail_service.users().messages().modify(
+                                userId='me',
+                                id=email['id'],
+                                body={'removeLabelIds': ['UNREAD']}
+                            ).execute()
 
-                            try:
-                                self.exponential_backoff_retry(_mark_as_read_operation)
-                                self.logger.debug(f"Marked email {email['id']} as read")
-                            except Exception as e:
-                                self.logger.error(f"Error marking email as read after retries: {e}")
+                        try:
+                            self.exponential_backoff_retry(_mark_as_read_operation)
+                            self.logger.debug(f"Marked email {email['id']} as read")
+                        except Exception as e:
+                            self.logger.error(f"Error marking email as read after retries: {e}")
 
                 # Wait for the specified interval before checking again
                 time.sleep(self.check_interval)

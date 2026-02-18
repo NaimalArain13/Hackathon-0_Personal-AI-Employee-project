@@ -14,7 +14,7 @@ import argparse
 import threading
 from pathlib import Path
 from typing import List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -63,6 +63,14 @@ class Orchestrator:
         # Initialize Silver Tier features
         self.approval_monitor_thread = None
         self.scheduled_task_thread = None
+
+        # Initialize Gold Tier scheduler (APScheduler)
+        self.scheduler = None
+        self._init_gold_tier_scheduler()
+
+        # Initialize Gold Tier health monitor and watchdog (T077)
+        self.health_monitor = None
+        self._init_gold_tier_health_monitor()
 
         self.logger.info("Orchestrator initialized successfully")
 
@@ -115,6 +123,139 @@ class Orchestrator:
 
         return config
 
+    # ==================== Gold Tier: Scheduler ====================
+
+    def _init_gold_tier_scheduler(self):
+        """
+        Initialize APScheduler with the weekly audit/briefing job.
+
+        Configuration (T062, T063):
+        - CronTrigger: Sunday at 22:00 UTC
+        - coalesce=True: Run once if multiple triggers missed (e.g., after downtime)
+        - max_instances=1: Prevent concurrent audit generation
+        """
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            from apscheduler.triggers.cron import CronTrigger
+
+            self.scheduler = BackgroundScheduler()
+
+            self.scheduler.add_job(
+                func=self.weekly_audit_job,
+                trigger=CronTrigger(day_of_week='sun', hour=22, minute=0),
+                id='weekly_audit_job',
+                coalesce=True,
+                max_instances=1,
+                replace_existing=True
+            )
+
+            self.logger.info("Gold Tier scheduler configured: weekly audit/briefing every Sunday at 22:00 UTC")
+
+        except ImportError:
+            self.logger.warning(
+                "APScheduler not installed — Gold Tier weekly audit disabled. "
+                "Install with: pip install apscheduler"
+            )
+            self.scheduler = None
+
+    def weekly_audit_job(self):
+        """
+        Gold Tier weekly audit job (T064).
+
+        Runs every Sunday at 22:00 UTC:
+        1. Determines week_end (today as Sunday)
+        2. Generates weekly audit report
+        3. Generates CEO briefing from audit
+        4. Logs results; creates Needs_Action alert on failure
+        """
+        self.logger.info("weekly_audit_job: Starting Gold Tier audit and CEO briefing generation")
+
+        # Compute week_end = today (should be Sunday when triggered by cron)
+        week_end = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Guard: ensure it's a Sunday (weekday 6); if not, roll back to last Sunday
+        if week_end.weekday() != 6:
+            days_back = (week_end.weekday() + 1) % 7
+            week_end -= timedelta(days=days_back)
+            self.logger.warning(
+                f"weekly_audit_job triggered on non-Sunday; adjusted week_end to {week_end.date()}"
+            )
+
+        vault_path = Path(self.config.get('VAULT_PATH', 'AI_Employee'))
+
+        # --- Step 1: Generate weekly audit ---
+        try:
+            from utils.audit_generator import generate_weekly_audit
+        except ImportError:
+            self.logger.error("weekly_audit_job: Cannot import audit_generator — skipping")
+            return
+
+        self.logger.info(f"weekly_audit_job: Generating audit for week ending {week_end.date()}")
+        audit_result = generate_weekly_audit(
+            week_end=week_end,
+            output_dir=vault_path / 'Audits',
+            vault_path=vault_path
+        )
+
+        if not audit_result.success:
+            self.logger.error(f"weekly_audit_job: Audit generation FAILED — {audit_result.error}")
+            # Alert already created by audit_generator; return early
+            return
+
+        self.logger.info(
+            f"weekly_audit_job: Audit complete — "
+            f"{audit_result.metrics.total_actions} actions, "
+            f"{audit_result.metrics.total_errors} errors"
+        )
+
+        # --- Step 2: Generate CEO briefing ---
+        try:
+            from utils.ceo_briefing_generator import generate_ceo_briefing
+        except ImportError:
+            self.logger.error("weekly_audit_job: Cannot import ceo_briefing_generator — skipping briefing")
+            return
+
+        briefing_result = generate_ceo_briefing(
+            week_end=week_end,
+            audit_result=audit_result,
+            output_dir=vault_path / 'CEO_Briefings',
+            vault_path=vault_path
+        )
+
+        if not briefing_result.success:
+            self.logger.error(f"weekly_audit_job: Briefing generation FAILED — {briefing_result.error}")
+            return
+
+        self.logger.info(
+            f"weekly_audit_job: Briefing complete — {briefing_result.file_path} "
+            f"({len(briefing_result.bottlenecks)} bottlenecks, {len(briefing_result.suggestions)} suggestions)"
+        )
+
+    def _init_gold_tier_health_monitor(self):
+        """
+        Initialize HealthMonitor in Gold Tier mode (T077).
+
+        Enables watchdog for all 4 Gold Tier MCP servers:
+        odoo, facebook, instagram, twitter.
+        30-second polling loop starts on orchestrator.run().
+        """
+        try:
+            from utils.health_monitor import HealthMonitor
+            vault_path = self.config.get('VAULT_PATH', 'AI_Employee')
+            self.health_monitor = HealthMonitor(vault_path=vault_path)
+
+            # Enable watchdog for all Gold Tier services
+            for service in ('odoo', 'facebook', 'instagram', 'twitter'):
+                self.health_monitor.enable_watchdog(service)
+
+            self.logger.info(
+                "Gold Tier HealthMonitor initialized — watchdog enabled for: "
+                "odoo, facebook, instagram, twitter"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not initialize HealthMonitor: {exc}")
+            self.health_monitor = None
+
     def signal_handler(self, signum, frame):
         """
         Handle shutdown signals gracefully.
@@ -125,6 +266,13 @@ class Orchestrator:
         """
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+        if self.scheduler and self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
+            self.logger.info("Gold Tier scheduler stopped")
+        if self.health_monitor:
+            self.health_monitor.stop_mcp_polling()
+            self.health_monitor.stop_monitoring()
+            self.logger.info("Gold Tier HealthMonitor stopped")
 
     def initialize_watchers(self) -> List[Any]:
         """
@@ -279,6 +427,21 @@ class Orchestrator:
 
         # Start approval monitoring (Silver Tier feature)
         self.start_approval_monitoring()
+
+        # Start Gold Tier scheduler
+        if self.scheduler is not None:
+            self.scheduler.start()
+            self.logger.info("Gold Tier scheduler started — weekly audit/briefing armed for Sunday 22:00 UTC")
+
+        # Start Gold Tier health monitoring (T077)
+        if self.health_monitor is not None:
+            # General health check every 5 minutes
+            self.health_monitor.start_monitoring(check_interval=300)
+            # Dedicated MCP polling every 30 seconds (T070)
+            self.health_monitor.start_mcp_polling(poll_interval=30)
+            # Initial log retention compliance check (T078)
+            self.health_monitor.check_log_retention(retention_days=90)
+            self.logger.info("Gold Tier HealthMonitor started: 30s MCP polling + 5min general health")
 
         # Run watchers concurrently
         self.logger.info(f"Starting {len(self.watchers)} watcher(s) concurrently...")
